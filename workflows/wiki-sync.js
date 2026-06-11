@@ -25,8 +25,8 @@ const DETECT_SCHEMA = {
       items: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: '相对 WIKI_ROOT 的路径，如 raw/sources/知识工程/xxx.md' },
-          direction: { type: 'string', description: '所属工作方向（来自目录名）: 知识工程/Agent工程/AI-Delivery/跨方向' },
+          path: { type: 'string', description: '相对 WIKI_ROOT 的路径，如 raw/sources/my-topic/xxx.md' },
+          direction: { type: 'string', description: '所属方向，取 raw/sources/ 下的子目录名' },
           reason: { type: 'string', description: '判定为未摄入的依据' },
         },
         required: ['path', 'direction', 'reason']
