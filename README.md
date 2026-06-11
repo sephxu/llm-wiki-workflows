@@ -100,15 +100,15 @@ Workflow 有四种调用入口，适合不同场景。
 "看看有没有没入库的新素材"
 ```
 
-### 2. Slash 命令（需配置 Skill）
+### 2. Slash 命令（自动发现）
 
-在 `.claude/commands/` 或 Superpowers 技能系统中配置命令，实现 `/wiki-ingest`、`/wiki-lint` 等快捷触发。技能文件示例：
+将 `.js` 文件放入项目的 `.claude/workflows/` 目录后，Claude Code 会自动索引，在 `/` 命令菜单中直接出现，无需额外配置：
 
-```markdown
----
-description: 将 raw/sources 中的新素材摄入为 wiki 页面
----
-Invoke: Workflow({ name: "wiki-ingest", args: ... })
+```
+/wiki-ingest
+/wiki-lint
+/wiki-sync
+/wiki-dedup
 ```
 
 ### 3. 工具调用（编程/精确控制）
