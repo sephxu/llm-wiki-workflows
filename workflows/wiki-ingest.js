@@ -6,8 +6,8 @@ export const meta = {
   phases: [
     { title: '分析', detail: '理解源文件内容和现有 wiki 的关系' },
     { title: '生成', detail: '创建 wiki 页面并写入文件' },
-    { title: '互链', detail: '在新旧页面间添加 wikilink' },
-    { title: '收尾', detail: '更新 index.md 和 log.md' },
+    { title: '互链', detail: '两阶段：发现反向链接候选 → 精准替换（不重写页面）' },
+    { title: '收尾', detail: '更新 index.md、overview.md 和 log.md' },
   ],
 }
 
@@ -91,24 +91,6 @@ const GENERATE_SCHEMA = {
   required: ['pages_written']
 }
 
-const ENRICH_SCHEMA = {
-  type: 'object',
-  properties: {
-    links_added: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          file: { type: 'string', description: '被修改的文件路径' },
-          added_links: { type: 'array', items: { type: 'string' }, description: '添加的 [[wikilink]] 列表' },
-        },
-        required: ['file', 'added_links']
-      }
-    }
-  },
-  required: ['links_added']
-}
-
 // ===== Stage 1: 分析 =====
 phase('分析')
 log(`开始分析 ${FILES.length} 个源文件`)
@@ -177,30 +159,87 @@ const validGenerations = generations.filter(Boolean)
 const allPagesWritten = validGenerations.flatMap(g => g.pages_written)
 log(`生成完成: 共写入 ${allPagesWritten.length} 个页面`)
 
-// ===== Stage 3: 互链 =====
+// ===== Stage 3: 互链（两阶段：发现 → 精准替换）=====
 phase('互链')
 
 if (allPagesWritten.length > 0) {
-  const newSlugs = allPagesWritten.map(p => p.slug)
+  const newPagesSummary = allPagesWritten.map(p =>
+    `slug: ${p.slug}, title: ${p.title}, type: ${p.type}`
+  ).join('\n')
 
-  await agent(`你是一个知识库管理员。刚刚创建/更新了以下 wiki 页面:
+  // Phase 3a: 发现 — LLM 返回需要补充反向链接的候选列表（JSON），不修改任何文件
+  const BACKLINK_SCHEMA = {
+    type: 'object',
+    properties: {
+      substitutions: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            file: { type: 'string', description: '需要修改的已有页面相对路径（如 wiki/concepts/foo.md）' },
+            term: { type: 'string', description: '页面正文中实际出现的、待包裹为 [[]] 的精确原文字符串' },
+            target: { type: 'string', description: '目标新页面的 slug' },
+          },
+          required: ['file', 'term', 'target']
+        }
+      }
+    },
+    required: ['substitutions']
+  }
 
-${allPagesWritten.map(p => `- ${p.path} (slug: ${p.slug}, type: ${p.type})`).join('\n')}
+  const discovery = await agent(`你是知识库管理员。以下是刚刚 ingest 的新页面列表：
+${newPagesSummary}
 
-任务: 检查现有 wiki 页面，在内容相关的地方添加指向新页面的 [[wikilink]]。
+任务：扫描 ${WIKI_ROOT}/wiki/ 下已有页面，找出哪些已有页面的正文中出现了新页面涵盖的主题，但尚未用 [[wikilink]] 引用。
 
-步骤:
-1. 读取 ${WIKI_ROOT}/wiki/index.md 获取所有页面列表
-2. 对于每个可能相关的现有页面，读取内容
-3. 如果页面内容提到了新页面涵盖的主题但没有 wikilink，添加 [[${newSlugs.join(']] 或 [[')}]]
-4. 只在语义真正相关的地方添加链接，不要强行添加
-5. 同时检查新页面是否遗漏了对现有页面的引用
-
-wiki 根目录: ${WIKI_ROOT}`, {
-    label: 'enrich-wikilinks',
+步骤：
+1. 读取 ${WIKI_ROOT}/wiki/index.md 了解所有现有页面
+2. 对可能相关的已有页面读取内容
+3. 如正文（--- 之后的部分）出现了与新页面高度匹配的术语/概念名称，且未被 [[ ]] 包裹，记录：
+   - file: 已有页面相对 ${WIKI_ROOT} 的路径（如 wiki/concepts/foo.md）
+   - term: 页面中实际出现的精确文字（必须与原文完全一致，不要修改）
+   - target: 对应新页面的 slug
+4. 每个 (file, target) 组合只记录一次（选最准确的首次出现 term）
+5. 只在语义强相关时记录，不要强行链接
+6. 不要修改任何文件，只返回 JSON 列表`, {
+    label: 'discover-backlinks',
     phase: '互链',
-    schema: ENRICH_SCHEMA
+    schema: BACKLINK_SCHEMA
   })
+
+  const subs = discovery?.substitutions || []
+  log(`互链发现：${subs.length} 处需补充反向链接`)
+
+  if (subs.length > 0) {
+    // Phase 3b: 精准替换 — 按文件分组，每个 agent 只负责一个文件的所有替换
+    // 这样 LLM 拿到的是"修改哪个文件、替换什么"的精确指令，而不是"重写页面"
+    const byFile = {}
+    for (const s of subs) {
+      if (!byFile[s.file]) byFile[s.file] = []
+      byFile[s.file].push(s)
+    }
+
+    await parallel(
+      Object.entries(byFile).map(([file, fileSubs]) => () =>
+        agent(`对文件 ${WIKI_ROOT}/${file} 执行精准 wikilink 替换：
+
+${fileSubs.map(s => `- 将正文中的「${s.term}」（第一次出现）替换为 [[${s.target}|${s.term}]]`).join('\n')}
+
+严格规则（违反则终止操作）：
+1. 读取文件完整内容
+2. 对每条替换：在 frontmatter（---）结束之后的正文部分，找第一次出现的精确字符串
+3. 如该术语已被 [[ ]] 包裹，或在代码块 / 引用块内，跳过
+4. 只做字符串替换，不修改任何其他内容（不添加文字、不改变格式、不更新 frontmatter）
+5. 将修改后的完整文件内容写回原路径`, {
+          label: `apply-links:${file.split('/').pop()}`,
+          phase: '互链'
+        })
+      )
+    )
+    log(`互链完成：修改了 ${Object.keys(byFile).length} 个已有页面，补充 ${subs.length} 处 [[wikilink]]`)
+  } else {
+    log('互链：无需补充反向链接')
+  }
 }
 
 // ===== Stage 4: 收尾 =====
@@ -213,12 +252,13 @@ ${allPagesWritten.map(p => `- ${p.slug} (${p.type}): ${p.title} → ${p.path}`).
 
 任务:
 1. 读取 ${WIKI_ROOT}/wiki/index.md
-2. 在对应的类型分组下注册新页面（格式: - [[slug]] — 一行描述）
-3. 如果 index.md 中没有对应的分组标题（如 "## 来源 (Sources)"），添加分组
-4. 读取 ${WIKI_ROOT}/wiki/log.md，追加一条操作日志:
-   格式: | ${today} | ingest | 新增 xxx、xxx 页面 | source: raw/sources/... |
+2. 在对应的类型分组下注册新页面（格式: - [[slug]] — 一行描述），不要重复注册已有页面
+3. 如果 index.md 中没有对应的分组标题，添加分组
+4. 读取 ${WIKI_ROOT}/wiki/overview.md，根据新增内容更新全局概览（若无需更新则跳过）
+5. 读取 ${WIKI_ROOT}/wiki/log.md，追加一条操作日志:
+   格式: ## [${today}] ingest | <本次 ingest 的主题>
 
-确保不重复注册已有的页面。`, {
+   简要说明新增了哪些页面、更新了哪些已有页面。`, {
   label: 'finalize',
   phase: '收尾',
 })

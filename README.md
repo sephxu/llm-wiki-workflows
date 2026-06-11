@@ -36,7 +36,7 @@ schema.md               # 页面类型路由规则
 
 将 `raw/sources/` 中的原始素材摄入为结构化 Wiki 页面。
 
-**四阶段流程：** 分析 → 生成 → 互链 → 收尾
+**四阶段流程：** 分析 → 生成 → 互链（两阶段） → 收尾
 
 ```js
 // 用法
@@ -47,14 +47,24 @@ Workflow({ name: 'wiki-ingest', args: {
 }})
 ```
 
+**Stage 3 互链设计（v2）：** 改为两阶段：(1) 发现阶段——LLM 返回 `{file, term, target}[]` JSON 列表，不修改任何文件；(2) 精准替换阶段——按文件分组，每个 agent 只执行精确字符串替换，避免 LLM 改写页面内容。
+
 ### `wiki-sync.js`
 
-自动探测 `raw/sources/` 中未摄入的文件，增量调用 `wiki-ingest`。
+确定性探测 `raw/sources/` 中未摄入的文件，增量调用 `wiki-ingest`。
 
 ```js
-// 用法（无需参数，全自动）
+// 用法（无需参数，全自动扫描）
 Workflow({ name: 'wiki-sync' })
+
+// 强制重新 ingest 所有文件（内容更新后使用）
+Workflow({ name: 'wiki-sync', args: { force: true } })
+
+// 限定扫描子目录
+Workflow({ name: 'wiki-sync', args: { dirs: ['知识工程', 'Agent工程'] } })
 ```
+
+**探测机制（v2）：** 用 `find` 列出 `raw/sources/` 全量文件，`grep sources:` 提取已摄入引用，JS 层做集合差。不再依赖 LLM 读 `log.md` 猜测（LLM 会误判已有 log 记录但 sources: 字段缺失的情况）。
 
 ### `wiki-lint.js`
 
@@ -68,11 +78,37 @@ Workflow({ name: 'wiki-lint' })
 Workflow({ name: 'wiki-lint', args: { fix: true } })
 ```
 
-**检查项：**
+**检查项（v2 新增）：**
 - 孤页（无任何入站 wikilink）
 - 断链（`[[wikilink]]` 指向不存在的页面）
+- `related:` 字段引用不存在的 slug
+- `index.md` 过期条目（指向已删除的页面）
+- 缺失必要 frontmatter 字段（`type` 或 `title`）
 - 被 ≥2 处引用但不存在的概念（建议创建）
 - 未注册到 `index.md` 的页面
+
+**扫描机制（v2）：** Phase 1 改用 grep/find 确定性提取 wikilink 图，不再依赖 LLM 逐页读取。
+
+### `wiki-synthesize.js` ✨ 新增
+
+发现跨源高频主题，生成 `wiki/synthesis/` 综合分析页面（Karpathy llm-wiki 理念的核心体现）。
+
+```js
+// 自动发现并生成（≥2 个来源覆盖的主题）
+Workflow({ name: 'wiki-synthesize' })
+
+// 手动指定要综合的主题
+Workflow({ name: 'wiki-synthesize', args: {
+  topics: ['evoloop', 'agent-runner'],
+  min_sources: 3
+}})
+```
+
+**四阶段流程：**
+1. **发现** — 提取所有 source 页引用的 slug，JS 层统计频次，找出被 ≥N 个来源覆盖的交叉主题
+2. **规划** — LLM 判断哪些主题值得创建/更新综合页（对比/演进/矛盾/实践洞察等切入角度）
+3. **生成** — 并行为每个综合主题创建 `wiki/synthesis/*.md`，注明来源、保留原文出处
+4. **收尾** — 注册到 `index.md`，写入 `log.md`
 
 ### `wiki-dedup.js`
 
@@ -106,9 +142,10 @@ Workflow 有四种调用入口，适合不同场景。
 
 ```
 /wiki-ingest
-/wiki-lint
 /wiki-sync
+/wiki-lint
 /wiki-dedup
+/wiki-synthesize
 ```
 
 ### 3. 工具调用（编程/精确控制）
