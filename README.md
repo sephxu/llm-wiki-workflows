@@ -86,6 +86,57 @@ Workflow({ name: 'wiki-dedup' })
 Workflow({ name: 'wiki-dedup', args: { merge: true } })
 ```
 
+## 触发方式
+
+Workflow 有四种调用入口，适合不同场景。
+
+### 1. 自然语言对话（最常用）
+
+直接在 Claude Code 对话中描述意图，Claude 会自动判断并触发对应 workflow：
+
+```
+"帮我把 raw/sources/知识工程/ 下的新文档摄入进来"
+"做个 wiki 健康检查"
+"看看有没有没入库的新素材"
+```
+
+### 2. Slash 命令（需配置 Skill）
+
+在 `.claude/commands/` 或 Superpowers 技能系统中配置命令，实现 `/wiki-ingest`、`/wiki-lint` 等快捷触发。技能文件示例：
+
+```markdown
+---
+description: 将 raw/sources 中的新素材摄入为 wiki 页面
+---
+Invoke: Workflow({ name: "wiki-ingest", args: ... })
+```
+
+### 3. 工具调用（编程/精确控制）
+
+在 Claude Code 对话中直接调用 `Workflow` 工具，支持传入参数：
+
+```js
+// 按名称触发（需文件在 .claude/workflows/ 下）
+Workflow({ name: 'wiki-lint', args: { fix: true } })
+
+// 按脚本路径触发
+Workflow({ scriptPath: '.claude/workflows/wiki-ingest.js', args: { files: [...] } })
+
+// 子工作流嵌套调用（在 workflow 脚本内部）
+const result = await workflow('wiki-ingest', { files: [...] })
+```
+
+### 4. 定时任务（自动化巡检）
+
+通过 Claude Code 的 `CronCreate` 工具设置定期触发，例如每天自动同步：
+
+```
+"每天早上 9 点帮我跑一次 wiki-sync"
+→ Claude 会用 CronCreate 注册定时任务
+```
+
+---
+
 ## 安装
 
 将 `workflows/` 目录下的 `.js` 文件复制到你的 Claude Code 项目的 `.claude/workflows/` 目录下即可。
